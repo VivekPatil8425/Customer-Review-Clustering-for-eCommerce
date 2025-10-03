@@ -8,6 +8,22 @@ import itertools
 import numpy as np
 import pandas as pd
 import streamlit as st
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import nltk
+
+# ----------------------------------------------------
+# ADD THIS SECTION TO DOWNLOAD THE REQUIRED NLTK DATA
+# ----------------------------------------------------
+try:
+    # This checks if the VADER lexicon is already available
+    nltk.data.find('sentiment/vader_lexicon.zip')
+except nltk.downloader.DownloadError:
+    # If not found, download it. This is the fix for the LookupError.
+    nltk.download('vader_lexicon')
+except LookupError:
+    # This handles the initial LookupError before the download attempt
+    nltk.download('vader_lexicon')
+# ----------------------------------------------------
 
 from typing import List, Tuple, Optional, Dict
 from collections import Counter, defaultdict
@@ -406,3 +422,4 @@ if run_btn:
 
 else:
     st.info("Upload files and click Run Clustering from the sidebar to begin.")
+
