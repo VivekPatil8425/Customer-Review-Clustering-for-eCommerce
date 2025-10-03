@@ -1,18 +1,15 @@
 # app.py
 import io
 import re
-import math
 import json
-import string
-import itertools
 import numpy as np
 import pandas as pd
 import streamlit as st
+from typing import List, Tuple, Optional
 
-from typing import List, Tuple, Optional, Dict
-from collections import Counter, defaultdict
-
+# -----------------------------
 # Optional imports handled safely
+# -----------------------------
 SPACY_OK = True
 try:
     import spacy
@@ -34,41 +31,44 @@ try:
 except Exception:
     SKLEARN_OK = False
 
+# Use vaderSentiment (bundles lexicon) to avoid NLTK LookupError
 VADER_OK = True
 try:
-    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 except Exception:
     VADER_OK = False
 
 # -----------------------------
-# UI: Sidebar configuration
+# Page config
 # -----------------------------
 st.set_page_config(page_title="Customer Review Clustering (Aspect-Based)", layout="wide")
-
 st.title("Customer Review Clustering for eCommerce")
-st.caption("Drag & drop TXT, CSV, Excel, or Word (.docx), then cluster reviews with optional aspect extraction and sentiment analysis.")
+st.caption("Drag & drop TXT, CSV, Excel, or Word (.docx) and cluster reviews by aspects with optional sentiment and visualizations.")
 
+# -----------------------------
+# Sidebar controls
+# -----------------------------
 with st.sidebar:
     st.header("Upload files")
     uploaded_files = st.file_uploader(
         "Drop TXT / CSV / XLSX / DOCX here",
         type=["txt", "csv", "xlsx", "xls", "docx"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        help="Multiple file upload supported; files are handled in memory."  # Streamlit stores in-memory
     )
 
-    st.header("Text column (for CSV/Excel)")
-    default_text_cols = ["review", "text", "comment", "feedback", "reviews"]
+    st.header("Text column (CSV/Excel)")
     text_col_hint = st.text_input(
-        "Preferred text column name (optional)",
+        "Preferred text column name",
         value="review",
-        help="If present in CSV/Excel, this column will be used. Otherwise the first text-like column will be auto-detected."
+        help="If present, this column is used; else the first text-like column is auto-detected."
     )
 
     st.header("Representation")
     use_aspects = st.checkbox(
-        "Extract aspects (noun chunks) with spaCy",
+        "Extract aspects (noun chunks) via spaCy",
         value=True,
-        help="Turns reviews into aspect phrases like 'fast delivery', 'customer service'. If spaCy isn't available, the app will fall back."
+        help="Turns reviews into phrases like 'fast delivery', 'customer service'; falls back if spaCy unavailable."
     )
     ngrams = st.selectbox("N-grams for TF-IDF", options=["Unigrams (1)", "Uni+Bigrams (1,2)"], index=1)
 
@@ -78,7 +78,7 @@ with st.sidebar:
         auto_k = st.checkbox("Auto-pick K (silhouette)", value=True)
         k_value = st.slider("K (clusters)", min_value=2, max_value=12, value=5)
     else:
-        eps = st.slider("DBSCAN eps", min_value=0.1, max_value=2.0, step=0.1, value=0.8)
+        eps = st.slider("DBSCAN eps (cosine)", min_value=0.1, max_value=2.0, step=0.1, value=0.8)
         min_samples = st.slider("DBSCAN min_samples", min_value=3, max_value=20, value=5)
 
     st.header("Sentiment")
@@ -107,62 +107,19 @@ def load_docx(file) -> str:
     except Exception:
         return ""
 
-def load_text_from_any(file, preferred_col: Optional[str]) -> List[str]:
-    name = file.name.lower()
-    if name.endswith(".txt"):
-        try:
-            content = file.read()
-            if isinstance(content, bytes):
-                content = content.decode("utf-8", errors="ignore")
-            return [clean_text(content)]
-        finally:
-            file.seek(0)
-
-    if name.endswith(".csv"):
-        try:
-            df = pd.read_csv(file)
-        finally:
-            file.seek(0)
-        return extract_text_from_df(df, preferred_col)
-
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        try:
-            df = pd.read_excel(file)
-        finally:
-            file.seek(0)
-        return extract_text_from_df(df, preferred_col)
-
-    if name.endswith(".docx"):
-        txt = load_docx(file)
-        return [clean_text(txt)] if txt else []
-
-    # Fallback: try read as text
-    try:
-        content = file.read()
-        if isinstance(content, bytes):
-            content = content.decode("utf-8", errors="ignore")
-        return [clean_text(content)]
-    except Exception:
-        return []
-    finally:
-        file.seek(0)
-
 def extract_text_from_df(df: pd.DataFrame, preferred_col: Optional[str]) -> List[str]:
     # Preferred column if present
     if preferred_col and preferred_col in df.columns:
         return [clean_text(x) for x in df[preferred_col].dropna().tolist() if str(x).strip()]
-
     # Try common text columns
     for c in ["review", "text", "comment", "feedback", "reviews"]:
         if c in df.columns:
             return [clean_text(x) for x in df[c].dropna().tolist() if str(x).strip()]
-
     # Otherwise, pick first object/string-like column
     for c in df.columns:
         if df[c].dtype == object:
             return [clean_text(x) for x in df[c].dropna().tolist() if str(x).strip()]
-
-    # Last resort: flatten all columns to strings
+    # Last resort: concatenate row text
     texts = []
     for _, row in df.iterrows():
         parts = []
@@ -173,6 +130,42 @@ def extract_text_from_df(df: pd.DataFrame, preferred_col: Optional[str]) -> List
         if parts:
             texts.append(clean_text(" ".join(parts)))
     return texts
+
+def load_text_from_any(file, preferred_col: Optional[str]) -> List[str]:
+    name = file.name.lower()
+    if name.endswith(".txt"):
+        try:
+            content = file.read()
+            if isinstance(content, bytes):
+                content = content.decode("utf-8", errors="ignore")
+            return [clean_text(content)]
+        finally:
+            file.seek(0)
+    if name.endswith(".csv"):
+        try:
+            df = pd.read_csv(file)
+        finally:
+            file.seek(0)
+        return extract_text_from_df(df, preferred_col)
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        try:
+            df = pd.read_excel(file)
+        finally:
+            file.seek(0)
+        return extract_text_from_df(df, preferred_col)
+    if name.endswith(".docx"):
+        txt = load_docx(file)
+        return [clean_text(txt)] if txt else []
+    # Fallback as text
+    try:
+        content = file.read()
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="ignore")
+        return [clean_text(content)]
+    except Exception:
+        return []
+    finally:
+        file.seek(0)
 
 @st.cache_resource(show_spinner=False)
 def load_spacy():
@@ -186,7 +179,6 @@ def load_spacy():
 def extract_aspects_spacy(texts: List[str]) -> List[str]:
     nlp = load_spacy()
     if not nlp:
-        # Fallback: return original texts
         return texts
     aspects = []
     for doc in nlp.pipe(texts, batch_size=64, disable=["ner", "lemmatizer"]):
@@ -197,10 +189,7 @@ def extract_aspects_spacy(texts: List[str]) -> List[str]:
 def vectorize_text(corpus: List[str], ngram_mode: str):
     if not SKLEARN_OK:
         return None, None
-    if ngram_mode.startswith("Uni+Bigrams"):
-        ngram_range = (1, 2)
-    else:
-        ngram_range = (1, 1)
+    ngram_range = (1, 2) if ngram_mode.startswith("Uni+Bigrams") else (1, 1)
     vectorizer = TfidfVectorizer(
         lowercase=True,
         stop_words="english",
@@ -216,7 +205,6 @@ def auto_pick_k(X, k_min=2, k_max=10, random_state=42):
         try:
             km = KMeans(n_clusters=k, random_state=random_state, n_init="auto")
             labels = km.fit_predict(X)
-            # Skip degenerate cases
             if len(set(labels)) < 2:
                 continue
             score = silhouette_score(X, labels, metric="cosine")
@@ -238,28 +226,17 @@ def run_dbscan(X, eps=0.8, min_samples=5):
     return db, labels
 
 def top_terms_per_cluster(vectorizer, X, labels, topn=10):
-    if not SKLEARN_OK or vectorizer is None:
+    if vectorizer is None:
         return {}
     terms = np.array(vectorizer.get_feature_names_out())
     cluster_terms = {}
-    unique_labels = sorted(list(set(labels)))
-    for cl in unique_labels:
-        if cl == -1:
-            # Noise for DBSCAN
-            idx = np.where(labels == cl)[0]
-            if len(idx) == 0:
-                continue
-            # Mean TF-IDF for noise cluster
-            mean_vec = X[idx].mean(axis=0).A1
-            top_idx = mean_vec.argsort()[::-1][:topn]
-            cluster_terms[cl] = terms[top_idx].tolist()
-        else:
-            idx = np.where(labels == cl)[0]
-            if len(idx) == 0:
-                continue
-            mean_vec = X[idx].mean(axis=0).A1
-            top_idx = mean_vec.argsort()[::-1][:topn]
-            cluster_terms[cl] = terms[top_idx].tolist()
+    for cl in sorted(set(labels)):
+        idx = np.where(labels == cl)[0]
+        if len(idx) == 0:
+            continue
+        mean_vec = X[idx].mean(axis=0).A1
+        top_idx = mean_vec.argsort()[::-1][:topn]
+        cluster_terms[cl] = terms[top_idx].tolist()
     return cluster_terms
 
 def compute_sentiment(texts: List[str]) -> List[float]:
@@ -278,13 +255,8 @@ def pca_2d(X):
     except Exception:
         return None
 
-# -----------------------------
-# Pipeline
-# -----------------------------
 def build_corpus(files, preferred_col) -> Tuple[List[str], List[int], List[str]]:
-    texts = []
-    src_index = []
-    src_name = []
+    texts, src_index, src_name = [], [], []
     for i, f in enumerate(files):
         parts = load_text_from_any(f, preferred_col)
         for p in parts:
@@ -303,15 +275,14 @@ def summarize_clusters(df: pd.DataFrame) -> pd.DataFrame:
     return aggs.sort_values(by="count", ascending=False)
 
 # -----------------------------
-# Main run
+# Main
 # -----------------------------
 if run_btn:
     if not uploaded_files:
         st.warning("Please upload at least one file to proceed.")
         st.stop()
-
     if not SKLEARN_OK:
-        st.error("scikit-learn is required for clustering. Add scikit-learn to your environment.")
+        st.error("scikit-learn is required for clustering; install scikit-learn in the environment.")
         st.stop()
 
     texts, src_i, src_name = build_corpus(uploaded_files, text_col_hint.strip() if text_col_hint else None)
@@ -321,7 +292,7 @@ if run_btn:
         st.warning("Need at least 3 texts to form meaningful clusters.")
         st.stop()
 
-    # Aspect extraction (optional)
+    # Aspect extraction
     if use_aspects:
         processed = extract_aspects_spacy(texts)
         used_mode = "Aspects (noun chunks)" if SPACY_OK and load_spacy() else "Original text (spaCy unavailable)"
@@ -332,14 +303,14 @@ if run_btn:
     # Vectorize
     vectorizer, X = vectorize_text(processed, ngrams)
     if X is None or X.shape[0] == 0 or X.shape[1] == 0:
-        st.error("Vectorization produced an empty matrix. Try different n-gram settings or disable aspects.")
+        st.error("Vectorization produced an empty matrix; adjust n-gram settings or disable aspects.")
         st.stop()
 
     # Cluster
     if algo == "KMeans":
         k_use = auto_pick_k(X) if auto_k else k_value
         model, labels = run_kmeans(X, k_use)
-        st.success(f"KMeans finished with K={len(set(labels))} cluster(s).")
+        st.success(f"KMeans finished with {len(set(labels))} cluster(s).")
     else:
         model, labels = run_dbscan(X, eps=eps, min_samples=min_samples)
         n_clusters = len([c for c in set(labels) if c != -1])
@@ -348,7 +319,7 @@ if run_btn:
     # Sentiment
     sentiments = compute_sentiment(texts) if do_sentiment else [0.0] * len(texts)
 
-    # Results DataFrame
+    # Results
     df = pd.DataFrame({
         "source_file": src_name,
         "text": texts,
@@ -357,10 +328,8 @@ if run_btn:
         "sentiment": sentiments
     })
 
-    # Top terms per cluster
     terms = top_terms_per_cluster(vectorizer, X, labels, topn=10)
 
-    # Layout Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Clusters", "Top Terms", "2D Plot"])
 
     with tab1:
@@ -372,7 +341,7 @@ if run_btn:
             "k": int(len(set(labels))) if algo == "KMeans" else None,
             "dbscan_eps": float(eps) if algo == "DBSCAN" else None,
             "dbscan_min_samples": int(min_samples) if algo == "DBSCAN" else None,
-            "sentiment": "VADER" if do_sentiment and VADER_OK else "Off"
+            "sentiment": "VADER (bundled)" if do_sentiment and VADER_OK else "Off"
         })
 
         st.subheader("Cluster Summary")
@@ -393,17 +362,16 @@ if run_btn:
             for cl, words in sorted(terms.items(), key=lambda kv: kv[0]):
                 st.write(f"Cluster {cl}: {', '.join(words)}")
         else:
-            st.info("No terms available. Try KMeans or adjust n‑gram/min_df.")
+            st.info("No terms available; try KMeans or adjust n‑gram/min_df.")
 
     with tab4:
         st.subheader("PCA Scatter (2D)")
         coords = pca_2d(X)
         if coords is None:
-            st.info("2D projection unavailable. Try smaller data or different settings.")
+            st.info("2D projection unavailable; try smaller data or different settings.")
         else:
             plot_df = pd.DataFrame({"x": coords[:, 0], "y": coords[:, 1], "cluster": labels})
             st.scatter_chart(plot_df, x="x", y="y", color="cluster", height=500)
 
 else:
-    st.info("Upload files and click Run Clustering from the sidebar to begin.")
-
+    st.info("Upload files in the sidebar and click Run Clustering to begin.")
