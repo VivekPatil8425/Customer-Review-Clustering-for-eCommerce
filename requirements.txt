@@ -2,6 +2,5 @@ streamlit
 pandas
 numpy
 scikit-learn
-python-docx
-nltk
-spacy
+vaderSentiment
+plotly
