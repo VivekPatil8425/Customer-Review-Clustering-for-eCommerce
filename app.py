@@ -6,19 +6,18 @@ import streamlit as st
 import plotly.express as px
 from typing import List, Optional
 
-# --- New Imports for Clustering (HAC) ---
+# --- Imports for Clustering (DBSCAN) ---
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import DBSCAN # Swapped from AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity
-from scipy.cluster.hierarchy import linkage # Used for distance metrics
 # --- Existing Imports (Sentiment) ---
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 # --- Configuration & Setup ---
-st.set_page_config(page_title="HAC Review Clustering", layout="wide")
-st.title("eCommerce Review Insight Hub (Hierarchical Clustering) 🌳")
-st.caption("Core Pipeline: CSV Upload -> TF-IDF -> Agglomerative Clustering (HAC) -> VADER Sentiment. Groups reviews based on hierarchy.")
+st.set_page_config(page_title="DBSCAN Review Clustering", layout="wide")
+st.title("eCommerce Review Insight Hub (DBSCAN Clustering) 🔬")
+st.caption("Core Pipeline: CSV Upload -> TF-IDF -> DBSCAN (Density-Based) -> VADER Sentiment. Identifies core groups and critical outliers.")
 
 # --- Global Components ---
 
@@ -38,20 +37,25 @@ with st.sidebar:
         help="e.g., 'text', 'comment', or 'review'."
     )
     
-    st.header("3. HAC Parameters")
-    # HAC uses 'n_clusters' just like K-Means' K
-    n_clusters = st.slider("Number of Clusters", min_value=3, max_value=10, value=5)
+    st.header("3. DBSCAN Parameters")
+    st.markdown("DBSCAN finds clusters based on density, so you tune **distance** and **min points**.")
     
-    # Crucial HAC Parameter to demonstrate understanding
-    linkage_type = st.selectbox(
-        "Linkage Method", 
-        options=['ward', 'average', 'complete'], 
-        index=0,
-        help="How distance between clusters is calculated. 'Ward' minimizes variance."
+    # DBSCAN Parameter 1: Epsilon (Max distance between two samples)
+    eps_value = st.slider(
+        "Epsilon (Eps - Max distance for similarity)", 
+        min_value=0.1, max_value=1.5, step=0.05, value=0.8,
+        help="A smaller Eps means only very similar reviews form a group. Cosine distance is used."
+    )
+    
+    # DBSCAN Parameter 2: Minimum Samples (Min points required to form a cluster)
+    min_samples = st.slider(
+        "Min Samples (Min points for a cluster)", 
+        min_value=3, max_value=20, value=5,
+        help="The minimum number of reviews required to form a dense area (a cluster)."
     )
     
     st.header("4. Run Analysis")
-    run_btn = st.button("Run HAC Clustering and Sentiment", type="primary")
+    run_btn = st.button("Run DBSCAN Clustering and Sentiment", type="primary")
 
 # --- Helper Functions (Core Logic) ---
 
@@ -93,9 +97,9 @@ def load_and_preprocess_data(file, col_name: str) -> Optional[pd.DataFrame]:
 
     return df_cleaned
 
-@st.cache_resource(show_spinner="Running HAC Clustering...")
-def run_hac_pipeline(reviews: List[str], n_clusters: int, linkage_type: str):
-    """Vectorizes, runs HAC, and extracts top terms."""
+@st.cache_resource(show_spinner="Running DBSCAN Clustering...")
+def run_dbscan_pipeline(reviews: List[str], eps_value: float, min_samples: int):
+    """Vectorizes, runs DBSCAN, and extracts top terms."""
     
     # 1. Vectorization (TF-IDF)
     vectorizer = TfidfVectorizer(
@@ -105,29 +109,24 @@ def run_hac_pipeline(reviews: List[str], n_clusters: int, linkage_type: str):
     )
     X = vectorizer.fit_transform(reviews)
 
-    # --- FIX: Set metric based on linkage type ---
-    # Ward linkage ONLY works with Euclidean distance (metric='l2' or 'euclidean')
-    # All other linkages work well with cosine distance for text.
-    if linkage_type == 'ward':
-        metric = 'euclidean'
-    else:
-        metric = 'cosine'
-    # ---------------------------------------------
-
-    # 2. HAC Clustering (Agglomerative Clustering)
-    hac = AgglomerativeClustering(
-        n_clusters=n_clusters, 
-        linkage=linkage_type, 
-        metric=metric 
+    # 2. DBSCAN Clustering (Density-Based)
+    # Using cosine metric which is appropriate for TF-IDF vectors
+    db = DBSCAN(
+        eps=eps_value, 
+        min_samples=min_samples, 
+        metric='cosine' 
     )
-    # AgglomerativeClustering fit_predict requires a dense array when using distance metrics
-    labels = hac.fit_predict(X.toarray())
+    # DBSCAN fit_predict requires a dense array
+    labels = db.fit_predict(X.toarray())
 
-    # 3. Top Terms Extraction (Same as K-Means for consistency)
+    # 3. Top Terms Extraction (Ignore Noise cluster -1 for keywords)
     terms = np.array(vectorizer.get_feature_names_out())
     cluster_terms = {}
     
-    for cl in sorted(set(labels)):
+    # Iterate over unique clusters, excluding the Noise cluster (-1)
+    unique_labels = sorted([l for l in set(labels) if l != -1])
+    
+    for cl in unique_labels:
         idx = np.where(labels == cl)[0]
         if len(idx) == 0: continue
         
@@ -137,14 +136,7 @@ def run_hac_pipeline(reviews: List[str], n_clusters: int, linkage_type: str):
         top_idx = mean_vec.argsort()[::-1][:5] 
         cluster_terms[cl] = terms[top_idx].tolist()
         
-    # 4. Linkage Matrix for Validation (The HAC value-add)
-    # The linkage function (from scipy) also needs the same metric used for clustering
-    # Note: Linkage requires a condensed distance matrix, not the feature matrix, 
-    # but using X.toarray() here works if the metric is supported.
-    # We will compute the linkage on the feature matrix using the determined metric.
-    Z = linkage(X.toarray(), method=linkage_type, metric=metric)
-    
-    return labels, cluster_terms, Z
+    return labels, cluster_terms, len(unique_labels)
 
 def summarize_data(df: pd.DataFrame) -> pd.DataFrame:
     """Calculates summary stats for display."""
@@ -154,7 +146,10 @@ def summarize_data(df: pd.DataFrame) -> pd.DataFrame:
         default='Neutral'
     ).astype(str)
 
-    aggs = df.groupby("cluster_id").agg(
+    # Rename cluster -1 to 'Noise/Outlier' for presentation clarity
+    df['cluster_display'] = df['cluster_id'].apply(lambda x: 'Noise/Outlier' if x == -1 else f'Cluster {x}')
+
+    aggs = df.groupby("cluster_display").agg(
         Count=('review', 'count'),
         Avg_Sentiment=('sentiment', 'mean'),
         Positive=('sentiment_class', lambda x: (x == 'Positive').sum()),
@@ -170,7 +165,6 @@ def summarize_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def plot_sentiment_pie(df: pd.DataFrame):
     """Generates an overall sentiment pie chart."""
-    # (Same as LDA/K-Means for consistent look)
     sentiment_counts = df['sentiment_class'].value_counts().reset_index()
     sentiment_counts.columns = ['Sentiment', 'Count']
     color_map = {'Positive': 'rgb(26, 179, 148)', 'Negative': 'rgb(220, 53, 69)', 'Neutral': 'rgb(255, 193, 7)'}
@@ -187,9 +181,8 @@ def plot_sentiment_pie(df: pd.DataFrame):
     fig.update_traces(textinfo='percent+label', marker=dict(line=dict(color='#000000', width=1)))
     return fig
 
-def plot_cluster_sentiment(subset: pd.DataFrame, cluster_id: int):
-    """Generates a sentiment bar chart for a single cluster."""
-    # (Same as LDA/K-Means for consistent look)
+def plot_cluster_sentiment(subset: pd.DataFrame, cluster_name: str):
+    """Generates a sentiment bar chart for a single cluster/noise group."""
     cluster_sentiment_counts = subset['sentiment_class'].value_counts().reset_index()
     cluster_sentiment_counts.columns = ['Sentiment', 'Count']
     
@@ -199,7 +192,7 @@ def plot_cluster_sentiment(subset: pd.DataFrame, cluster_id: int):
         cluster_sentiment_counts,
         x='Sentiment',
         y='Count',
-        title=f'Sentiment for Cluster {cluster_id}',
+        title=f'Sentiment for {cluster_name}',
         color='Sentiment',
         color_discrete_map=color_map,
         category_orders={"Sentiment": ["Positive", "Neutral", "Negative"]},
@@ -220,8 +213,8 @@ if run_btn and uploaded_file:
         
     reviews = data['review'].tolist()
 
-    # 2. Run HAC Pipeline
-    labels, cluster_terms, Z_matrix = run_hac_pipeline(reviews, n_clusters, linkage_type)
+    # 2. Run DBSCAN Pipeline
+    labels, cluster_terms, n_clusters_found = run_dbscan_pipeline(reviews, eps_value, min_samples)
 
     # 3. Compile Final DataFrame
     final_df = data.copy()
@@ -232,14 +225,16 @@ if run_btn and uploaded_file:
         st.stop()
         
     summary_df = summarize_data(final_df)
-
-    st.success(f"HAC Complete! {len(final_df)} reviews grouped into {n_clusters} Clusters using '{linkage_type}' linkage.")
+    noise_count = (labels == -1).sum()
+    
+    st.success(f"DBSCAN Complete! Found {n_clusters_found} core cluster(s) and {noise_count} noise/outlier review(s).")
     
     # --- Results Layout ---
     
-    st.header("Hierarchical Clustering Results")
+    st.header("DBSCAN Clustering Results")
     
-    tab1, tab2, tab3 = st.tabs(["Overview & Summary", "Detailed Cluster Breakdown", "HAC Validation (Distances)"])
+    # Removed the HAC Validation tab, simplified to two main tabs
+    tab1, tab2 = st.tabs(["Overview & Summary", "Detailed Cluster Breakdown"])
 
     with tab1:
         col_vis, col_summary = st.columns([1, 1])
@@ -250,37 +245,48 @@ if run_btn and uploaded_file:
             
         with col_summary:
             st.subheader("2. Cluster Summary Table")
-            summary_display = summary_df.rename(columns={'cluster_id': 'Cluster ID', 'Avg_Sentiment': 'Avg Sentiment Score'})
-            summary_display['Cluster ID'] = summary_display['Cluster ID'].apply(lambda x: f"Cluster {x}")
+            summary_display = summary_df.rename(columns={'cluster_display': 'Cluster Name', 'Avg_Sentiment': 'Avg Sentiment Score'})
             
             st.dataframe(summary_display, use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.subheader("3. Cluster Definitions (Aspects)")
         
-        for cluster_id in summary_df['cluster_id'].tolist():
-             if cluster_id in cluster_terms:
-                 st.write(f"**Cluster {cluster_id} Keywords:** {', '.join(cluster_terms[cluster_id])}")
+        # Display core clusters only
+        core_clusters = sorted([c for c in summary_df['cluster_display'].tolist() if c.startswith('Cluster')])
+        
+        for cluster_name in core_clusters:
+            cluster_id = int(cluster_name.split(' ')[1])
+            if cluster_id in cluster_terms:
+                 st.write(f"**{cluster_name} Keywords:** {', '.join(cluster_terms[cluster_id])}")
              
     with tab2:
-        st.subheader("Detailed Cluster Breakdown (Actionable Insights)")
+        st.subheader("Detailed Breakdown (Actionable Insights)")
 
-        cluster_labels = summary_df['cluster_id'].tolist()
+        cluster_labels = summary_df['cluster_display'].tolist()
         
-        for cluster_id in cluster_labels:
+        # Iterate over all cluster names (including Noise)
+        for cluster_name in cluster_labels:
+            is_noise = cluster_name.startswith('Noise')
+            cluster_id = -1 if is_noise else int(cluster_name.split(' ')[1])
+            
             subset = final_df[final_df["cluster_id"] == cluster_id].copy()
             
             if subset.empty: continue
             
-            # Build expander title using top terms (our "aspects")
-            top_term_str = ", ".join(cluster_terms[cluster_id])
-            title = f"Cluster {cluster_id}: **{top_term_str}** ({len(subset)} reviews)"
+            # Define title and top terms
+            if is_noise:
+                title = f"Noise/Outlier Reviews: **Unique & Specific** ({len(subset)} reviews)"
+                top_term_str = "No defining keywords (High-value outliers)"
+            else:
+                top_term_str = ", ".join(cluster_terms[cluster_id])
+                title = f"{cluster_name}: **{top_term_str}** ({len(subset)} reviews)"
 
             with st.expander(title, expanded=False):
                 col_chart, col_reviews = st.columns([1, 2])
                 
                 with col_chart:
-                    plot_cluster_sentiment(subset, cluster_id)
+                    plot_cluster_sentiment(subset, cluster_name)
                 
                 with col_reviews:
                     avg_s = subset['sentiment'].mean()
@@ -295,24 +301,8 @@ if run_btn and uploaded_file:
         
         st.subheader("Download Full Results")
         out_csv = final_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Clustered Data as CSV", out_csv, file_name="hac_reviews_results.csv", mime="text/csv")
+        st.download_button("Download Clustered Data as CSV", out_csv, file_name="dbscan_reviews_results.csv", mime="text/csv")
         
-    with tab3:
-        st.subheader("HAC Linkage Matrix (Validation)")
-        st.markdown(
-            """
-            This matrix is the foundation of the Dendrogram and is used to **justify the number of clusters (K)**. 
-            Each row represents a merger. The **Distance** column shows how far apart the two merging clusters were. 
-            Large jumps in distance suggest a good place to **stop merging** (i.e., your chosen K is a natural separation).
-            """
-        )
-        
-        # Create a DataFrame for the Z matrix for easy viewing
-        Z_df = pd.DataFrame(Z_matrix, columns=['Cluster 1 Index', 'Cluster 2 Index', 'Distance', 'New Cluster Size'])
-        Z_df.index = Z_df.index.rename('Merge Step')
-        Z_df['Distance'] = Z_df['Distance'].round(4)
-        
-        st.dataframe(Z_df, use_container_width=True)
 
 else:
-    st.info("Upload your CSV file in the sidebar, set the number of Clusters, and click 'Run HAC Clustering and Sentiment' to analyze your customer reviews.")
+    st.info("Upload your CSV file in the sidebar, set the DBSCAN parameters, and click 'Run DBSCAN Clustering and Sentiment' to analyze your customer reviews.")
