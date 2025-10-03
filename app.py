@@ -105,13 +105,23 @@ def run_hac_pipeline(reviews: List[str], n_clusters: int, linkage_type: str):
     )
     X = vectorizer.fit_transform(reviews)
 
+    # --- FIX: Set metric based on linkage type ---
+    # Ward linkage ONLY works with Euclidean distance (metric='l2' or 'euclidean')
+    # All other linkages work well with cosine distance for text.
+    if linkage_type == 'ward':
+        metric = 'euclidean'
+    else:
+        metric = 'cosine'
+    # ---------------------------------------------
+
     # 2. HAC Clustering (Agglomerative Clustering)
     hac = AgglomerativeClustering(
         n_clusters=n_clusters, 
         linkage=linkage_type, 
-        metric='cosine' # Use cosine similarity for text vectors
+        metric=metric 
     )
-    labels = hac.fit_predict(X.toarray()) # HAC often requires dense matrix
+    # AgglomerativeClustering fit_predict requires a dense array when using distance metrics
+    labels = hac.fit_predict(X.toarray())
 
     # 3. Top Terms Extraction (Same as K-Means for consistency)
     terms = np.array(vectorizer.get_feature_names_out())
@@ -128,8 +138,11 @@ def run_hac_pipeline(reviews: List[str], n_clusters: int, linkage_type: str):
         cluster_terms[cl] = terms[top_idx].tolist()
         
     # 4. Linkage Matrix for Validation (The HAC value-add)
-    # This matrix is the basis of the Dendrogram and shows the merge distances.
-    Z = linkage(X.toarray(), method=linkage_type, metric='cosine')
+    # The linkage function (from scipy) also needs the same metric used for clustering
+    # Note: Linkage requires a condensed distance matrix, not the feature matrix, 
+    # but using X.toarray() here works if the metric is supported.
+    # We will compute the linkage on the feature matrix using the determined metric.
+    Z = linkage(X.toarray(), method=linkage_type, metric=metric)
     
     return labels, cluster_terms, Z
 
